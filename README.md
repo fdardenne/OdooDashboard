@@ -1,5 +1,7 @@
 # Odoo Dashboard
 
+<img width="3454" height="1070" alt="image" src="https://github.com/user-attachments/assets/738f5a08-859d-437e-b74f-d4b30dc0d2c7" />
+
 A native macOS menu bar app for managing parallel Odoo development worktrees — create, run, rebase, and review multiple Odoo branches side by side, each with its own port, database, VS Code config, and status at a glance, without ever leaving the keyboard.
 
 It replaces the usual manual routine of `git stash` / `git checkout` / re-running `odoo-bin` with a different `--http-port` every time you switch tasks: every worktree here is a fully independent checkout with its own port, database, and Python interpreter, all visible and controllable from one dropdown.
