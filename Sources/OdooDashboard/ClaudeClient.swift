@@ -3,9 +3,23 @@ import Foundation
 /// Ports packages/server/src/claude.ts -- headless `claude -p` for
 /// description generation, and iTerm2 AppleScript automation for the
 /// interactive "Ask Claude" / "Resolve with Claude" sessions.
+///
+/// NOTE: cmux (see BinaryLocator.cmux) was tried here instead, since the
+/// user switched to it -- but live testing showed its CLI/socket API
+/// (workspace create, new-split, etc.) unconditionally rejects any caller
+/// that wasn't itself spawned inside a cmux-managed terminal ("Access
+/// denied - only processes started inside cmux can connect"), by design.
+/// There's no way for this standalone app to drive that API, so this stays
+/// on iTerm2. Opening a worktree's root directory in cmux directly (`cmux
+/// <path>`, which does work from outside) is a separate, simpler action --
+/// see WorktreeStore's "open-cmux".
 enum ClaudeClient {
-    static func askClaudeText(_ prompt: String, cwd: URL? = nil, timeout: TimeInterval = 45) async throws -> String {
-        try await ProcessRunner.run(BinaryLocator.claude, ["-p", prompt], cwd: cwd, timeout: timeout)
+    static func askClaudeText(_ prompt: String, cwd: URL? = nil, timeout: TimeInterval = 45, allowedTools: [String]? = nil) async throws -> String {
+        var args = ["-p", prompt]
+        if let allowedTools, !allowedTools.isEmpty {
+            args += ["--allowedTools"] + allowedTools
+        }
+        return try await ProcessRunner.run(BinaryLocator.claude, args, cwd: cwd, timeout: timeout)
     }
 
     private static func appleScriptEscape(_ s: String) -> String {

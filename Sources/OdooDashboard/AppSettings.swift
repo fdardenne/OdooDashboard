@@ -58,6 +58,8 @@ enum SettingsKeys {
     static let trigram = "trigram"
     static let worktreeRepos = "worktreeRepos"
     static let requiredRepos = "requiredRepos"
+    static let digestModules = "digestModules"
+    static let taskSearchProjectId = "taskSearchProjectId"
     static let odooApiKey = "odooApiKey"
     static let defaultInstallModules = "defaultInstallModules"
     static let defaultUpdateModules = "defaultUpdateModules"
@@ -75,6 +77,8 @@ enum SettingsKeys {
         static let trigram = "dafl"
         static let worktreeRepos = "odoo,enterprise,upgrade,design-themes,upgrade-util"
         static let requiredRepos = "odoo,enterprise"
+        static let digestModules = ""
+        static let taskSearchProjectId = ""
         static let defaultInstallModules = "l10n_be_hr_payroll"
         static let defaultUpdateModules = "l10n_be_hr_payroll"
     }
@@ -111,6 +115,8 @@ final class AppSettings: ObservableObject {
     @Published var trigram: String { didSet { defaults.set(trigram, forKey: SettingsKeys.trigram) } }
     @Published var worktreeReposRaw: String { didSet { defaults.set(worktreeReposRaw, forKey: SettingsKeys.worktreeRepos) } }
     @Published var requiredReposRaw: String { didSet { defaults.set(requiredReposRaw, forKey: SettingsKeys.requiredRepos) } }
+    @Published var digestModulesRaw: String { didSet { defaults.set(digestModulesRaw, forKey: SettingsKeys.digestModules) } }
+    @Published var taskSearchProjectId: String { didSet { defaults.set(taskSearchProjectId, forKey: SettingsKeys.taskSearchProjectId) } }
     @Published var odooApiKey: String { didSet { defaults.set(odooApiKey, forKey: SettingsKeys.odooApiKey) } }
     @Published var defaultInstallModules: String { didSet { defaults.set(defaultInstallModules, forKey: SettingsKeys.defaultInstallModules) } }
     @Published var defaultUpdateModules: String { didSet { defaults.set(defaultUpdateModules, forKey: SettingsKeys.defaultUpdateModules) } }
@@ -130,6 +136,8 @@ final class AppSettings: ObservableObject {
         trigram = defaults.string(forKey: SettingsKeys.trigram) ?? SettingsKeys.Defaults.trigram
         worktreeReposRaw = defaults.string(forKey: SettingsKeys.worktreeRepos) ?? SettingsKeys.Defaults.worktreeRepos
         requiredReposRaw = defaults.string(forKey: SettingsKeys.requiredRepos) ?? SettingsKeys.Defaults.requiredRepos
+        digestModulesRaw = defaults.string(forKey: SettingsKeys.digestModules) ?? SettingsKeys.Defaults.digestModules
+        taskSearchProjectId = defaults.string(forKey: SettingsKeys.taskSearchProjectId) ?? SettingsKeys.Defaults.taskSearchProjectId
         odooApiKey = defaults.string(forKey: SettingsKeys.odooApiKey) ?? ""
         defaultInstallModules = defaults.string(forKey: SettingsKeys.defaultInstallModules) ?? SettingsKeys.Defaults.defaultInstallModules
         defaultUpdateModules = defaults.string(forKey: SettingsKeys.defaultUpdateModules) ?? SettingsKeys.Defaults.defaultUpdateModules

@@ -50,6 +50,14 @@ struct SettingsView: View {
                     secureField("API token", subtitle: "Used to show a linked task's name, stage, and status", text: $settings.odooApiKey)
                 }
 
+                section("Digest") {
+                    textField("Modules to watch", subtitle: "Comma-separated addon names -- the digest only covers commits touching these", text: $settings.digestModulesRaw)
+                }
+
+                section("Task Search") {
+                    textField("Project ID", subtitle: "The numeric id from the project's odoo.com URL (e.g. .../project/128/tasks) -- search is scoped to this project", text: $settings.taskSearchProjectId)
+                }
+
                 section("Defaults for new worktrees") {
                     textField("Install modules", subtitle: nil, text: $settings.defaultInstallModules)
                     textField("Update modules", subtitle: nil, text: $settings.defaultUpdateModules)

@@ -10,6 +10,8 @@ struct PrInfo: Decodable, Sendable {
     let reviewDecision: String
     let mergebotApproved: Bool
     let ciStatus: String
+    /// GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN".
+    let mergeable: String
 }
 
 struct RunbotBuild: Decodable, Sendable {
@@ -36,11 +38,22 @@ struct RebaseReportItem: Decodable, Identifiable, Sendable {
     let message: String?
 }
 
-struct OdooTaskInfo: Decodable, Sendable {
+struct OdooTaskInfo: Codable, Sendable, Equatable {
     let id: Int
     let name: String
     let stageName: String
     let state: String
+    let url: String
+}
+
+/// One task from a project-scoped search -- plain-text description (HTML
+/// stripped), used both for display and as the raw material an LLM matches
+/// a search query against.
+struct OdooTaskSummary: Codable, Sendable, Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let description: String
+    let stageName: String
     let url: String
 }
 
@@ -63,15 +76,22 @@ struct WorktreeEntry: Decodable, Identifiable, Sendable {
     /// exactly which folder a rebase conflict is in.
     let repos: [String: String]
 
-    /// Worst-status color for the row's status rail -- mirrors the web
-    /// dashboard's railClass() so both surfaces read the same way.
+    /// Worst-status color for the row's status rail -- mirrors StatusLogic.prTone's
+    /// model exactly: merged/closed = done (green), r+/approved = will be
+    /// merged (green), changes requested/conflicting = actually blocked
+    /// (red). CI status alone doesn't drive this -- it's shown separately
+    /// via the runbot/build badges.
     var railColor: RailColor {
-        let prBad = pr.contains { $0?.ciStatus == "failure" || $0?.reviewDecision == "CHANGES_REQUESTED" }
+        func isFinished(_ p: PrInfo?) -> Bool { p?.state == "MERGED" || p?.state == "CLOSED" }
+        let prBad = pr.contains { p in
+            guard let p, !isFinished(p) else { return false }
+            return p.reviewDecision == "CHANGES_REQUESTED" || p.mergeable == "CONFLICTING"
+        }
         if prBad || runbot?.status == "failure" { return .red }
-        let prPending = pr.contains { $0?.ciStatus == "pending" }
+        let prPending = pr.contains { !isFinished($0) && $0?.ciStatus == "pending" }
         let taskInProgress = odooTask?.state.contains("in_progress") ?? false
         if prPending || taskInProgress { return .blue }
-        let approved = pr.contains { $0?.mergebotApproved == true || $0?.reviewDecision == "APPROVED" }
+        let approved = pr.contains { $0?.mergebotApproved == true || $0?.reviewDecision == "APPROVED" || isFinished($0) }
         if approved { return .green }
         return .gray
     }

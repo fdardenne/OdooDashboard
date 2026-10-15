@@ -10,6 +10,12 @@ final class WorktreeStore: ObservableObject {
     /// in the create sheet, since those are the versions guaranteed to
     /// resolve an interpreter. Not a restriction: any branch name works.
     @Published var configuredVersions: [String] = []
+    /// One-line "what's happening right now" text for a long-running action,
+    /// keyed the same way as `busy` ("<name>:<action>"). Cleared once the
+    /// action finishes (success or failure).
+    @Published var actionStatus: [String: String] = [:]
+    /// Same idea for the create-worktree sheet, which has no worktree name yet.
+    @Published var createProgress: String?
 
     private var timer: Timer?
 
@@ -51,7 +57,9 @@ final class WorktreeStore: ObservableObject {
         Task {
             switch action {
             case "open":
-                _ = try? await ProcessRunner.run(BinaryLocator.code, [Config.worktreesRoot.appendingPathComponent(name).path])
+                _ = try? await ProcessRunner.run(BinaryLocator.zed, [Config.worktreesRoot.appendingPathComponent(name).path])
+            case "open-cmux":
+                _ = try? await ProcessRunner.run(BinaryLocator.cmux, [Config.worktreesRoot.appendingPathComponent(name).path])
             case "start":
                 _ = try? await WorktreeManager.startWorktree(name)
             case "stop":
@@ -85,8 +93,21 @@ final class WorktreeStore: ObservableObject {
     func rebase(_ name: String) async -> [RebaseReportItem] {
         let key = "\(name):rebase"
         busy.insert(key)
-        defer { busy.remove(key) }
-        let reports = (try? await WorktreeManager.rebaseWorktree(name)) ?? []
+        defer { busy.remove(key); actionStatus[key] = nil }
+        let reports = (try? await WorktreeManager.rebaseWorktree(name) { [weak self] text in
+            Task { @MainActor in self?.actionStatus[key] = text }
+        }) ?? []
+        await refresh()
+        return reports
+    }
+
+    func pull(_ name: String) async -> [RebaseReportItem] {
+        let key = "\(name):pull"
+        busy.insert(key)
+        defer { busy.remove(key); actionStatus[key] = nil }
+        let reports = (try? await WorktreeManager.pullWorktree(name) { [weak self] text in
+            Task { @MainActor in self?.actionStatus[key] = text }
+        }) ?? []
         await refresh()
         return reports
     }
@@ -155,9 +176,41 @@ final class WorktreeStore: ObservableObject {
 
     struct CreateError: Error { let message: String }
 
+    /// Reads the draft straight off `keyboard` (not local view @State) and
+    /// writes progress/busy/error back onto it too, so the in-flight
+    /// creation and its form survive the panel being closed and reopened
+    /// mid-submit -- see the comment on KeyboardController's create* fields.
+    func submitCreate(_ keyboard: KeyboardController) {
+        guard !keyboard.createBusy else { return }
+        keyboard.createBusy = true
+        keyboard.createError = nil
+        Task {
+            do {
+                switch keyboard.createMode {
+                case .branch:
+                    let branch = keyboard.createBranchName.trimmingCharacters(in: .whitespaces)
+                    let taskId = keyboard.createTaskId.trimmingCharacters(in: .whitespaces)
+                    let fromBranch = keyboard.createFromBranch.trimmingCharacters(in: .whitespaces)
+                    try await create(taskId: taskId.isEmpty ? nil : taskId, fromBranch: fromBranch.isEmpty ? nil : fromBranch, branch: branch)
+                case .pr:
+                    try await create(prNumber: Int(keyboard.createPrNumber.trimmingCharacters(in: .whitespaces)), prRepo: keyboard.createPrRepo)
+                }
+                keyboard.resetCreateDraft()
+                keyboard.showCreate = false
+            } catch let e as CreateError {
+                keyboard.createError = e.message
+            } catch {
+                keyboard.createError = error.localizedDescription
+            }
+            keyboard.createBusy = false
+        }
+    }
+
     func create(taskId: String? = nil, fromBranch: String? = nil, branch: String? = nil, prNumber: Int? = nil, prRepo: String? = nil) async throws {
         var opts = CreateOptions(taskId: taskId, fromBranch: fromBranch, branch: branch)
+        defer { createProgress = nil }
         if let prNumber, let prRepo {
+            createProgress = "Resolving PR #\(prNumber) head branch…"
             do {
                 opts.branch = try await GitHubPrClient.resolvePrHeadBranch(repo: prRepo, number: prNumber)
             } catch {
@@ -168,7 +221,9 @@ final class WorktreeStore: ObservableObject {
             throw CreateError(message: "Provide either a task id or a PR number/branch.")
         }
         do {
-            _ = try await WorktreeManager.createWorktree(opts)
+            _ = try await WorktreeManager.createWorktree(opts) { [weak self] text in
+                Task { @MainActor in self?.createProgress = text }
+            }
         } catch {
             throw CreateError(message: error.localizedDescription)
         }

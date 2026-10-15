@@ -2,18 +2,7 @@ import SwiftUI
 
 struct CreateWorktreeView: View {
     @EnvironmentObject var store: WorktreeStore
-    @Environment(\.dismiss) private var dismiss
-
-    private enum Mode: String, CaseIterable { case task = "New task", branch = "Branch", pr = "PR number" }
-
-    @State private var mode: Mode = .task
-    @State private var taskId = ""
-    @State private var fromBranch = "master"
-    @State private var branchName = ""
-    @State private var prNumber = ""
-    @State private var prRepo = "enterprise"
-    @State private var busy = false
-    @State private var error: String?
+    @EnvironmentObject var keyboard: KeyboardController
 
     private let prRepos = Config.worktreeRepos
 
@@ -21,27 +10,33 @@ struct CreateWorktreeView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("New worktree").font(.system(size: 16, weight: .semibold)).foregroundStyle(Theme.ink)
 
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            Picker("", selection: $keyboard.createMode) {
+                ForEach(CreateMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            switch mode {
-            case .task: taskFields
+            switch keyboard.createMode {
             case .branch: branchFields
             case .pr: prFields
             }
 
-            if let error {
+            if let error = keyboard.createError {
                 Text(error).font(.system(size: 12)).foregroundStyle(Theme.red)
+            }
+
+            if keyboard.createBusy, let progress = store.createProgress {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                    Text(progress).font(.system(size: 12)).foregroundStyle(Theme.inkDim)
+                }
             }
 
             HStack {
                 Spacer()
-                ActionButton(title: "Cancel") { dismiss() }
-                ActionButton(title: busy ? "Creating…" : "Create", style: .primary, isDisabled: busy || !canSubmit) {
-                    submit()
+                ActionButton(title: "Cancel") { keyboard.showCreate = false }
+                ActionButton(title: keyboard.createBusy ? "Creating…" : "Create", style: .primary, isDisabled: keyboard.createBusy || !canSubmit) {
+                    store.submitCreate(keyboard)
                 }
             }
         }
@@ -54,68 +49,68 @@ struct CreateWorktreeView: View {
         // labels, typed field text) in white on this intentionally-light
         // background, i.e. invisible.
         .preferredColorScheme(.light)
-        .onAppear {
-            if store.configuredVersions.contains("master") { fromBranch = "master" }
-        }
     }
 
     private var canSubmit: Bool {
-        switch mode {
-        case .task: return !taskId.trimmingCharacters(in: .whitespaces).isEmpty
-        case .branch: return !branchName.trimmingCharacters(in: .whitespaces).isEmpty
-        case .pr: return !prNumber.trimmingCharacters(in: .whitespaces).isEmpty
+        switch keyboard.createMode {
+        case .branch: return !keyboard.createBranchName.trimmingCharacters(in: .whitespaces).isEmpty
+        case .pr: return !keyboard.createPrNumber.trimmingCharacters(in: .whitespaces).isEmpty
         }
     }
 
-    private var taskFields: some View {
+    // Any branch name works -- new or existing, any naming scheme. Task id
+    // is just metadata for the Odoo task badge, not something the branch
+    // name has to encode. We still take a free guess at it from whatever's
+    // typed (the "version-taskid-trigram" convention is common but not
+    // required), purely to save typing -- never overwrites a value the
+    // user already entered themselves.
+    private var branchFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            field("Task ID") { TextField("6482307", text: $taskId).textFieldStyle(.plain) }
+            field("Branch name") { TextField("any-branch-name", text: $keyboard.createBranchName).textFieldStyle(.plain) }
+                .onChange(of: keyboard.createBranchName) { _, newValue in
+                    if keyboard.createTaskId.isEmpty, let inferred = StatusLogic.inferredTaskId(fromBranch: newValue.trimmingCharacters(in: .whitespaces)) {
+                        keyboard.createTaskId = inferred
+                    }
+                }
+            Text("Existing branches are looked up on origin, then the \(Config.githubForkOwner) fork, and attached as-is. A name that doesn't exist anywhere yet is created fresh off \"From branch\" below.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.inkDim)
+
+            field("Odoo task id (optional)") { TextField("6482307", text: $keyboard.createTaskId).textFieldStyle(.plain) }
+
             VStack(alignment: .leading, spacing: 6) {
-                field("From branch") { TextField("master", text: $fromBranch).textFieldStyle(.plain) }
+                field("From branch") { TextField("master", text: $keyboard.createFromBranch).textFieldStyle(.plain) }
                 if !store.configuredVersions.isEmpty {
                     FlowLayout(spacing: 6) {
                         ForEach(store.configuredVersions, id: \.self) { version in
-                            Button(version) { fromBranch = version }
+                            Button(version) { keyboard.createFromBranch = version }
                                 .buttonStyle(.plain)
                                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(Capsule().fill(fromBranch == version ? Theme.accentBg : Theme.row))
-                                .foregroundStyle(fromBranch == version ? Theme.accent : Theme.inkDim)
+                                .background(Capsule().fill(keyboard.createFromBranch == version ? Theme.accentBg : Theme.row))
+                                .foregroundStyle(keyboard.createFromBranch == version ? Theme.accent : Theme.inkDim)
                         }
                     }
-                    Text("Versions with a configured Python interpreter -- any git branch works here, this is just a shortcut.")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Theme.inkDim)
                 }
-            }
-            field("Branch name (preview)") {
-                Text("\(fromBranch)-\(taskId.isEmpty ? "<taskId>" : taskId)-\(Config.trigram)")
+                Text("Only used if \"Branch name\" doesn't exist yet in a repo -- that's what it gets created from.")
+                    .font(.system(size: 10.5))
                     .foregroundStyle(Theme.inkDim)
-                    .font(.system(size: 12.5, design: .monospaced))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        }
-    }
-
-    private var branchFields: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            field("Existing branch name") { TextField("master-6482307-dafl", text: $branchName).textFieldStyle(.plain) }
-            Text("Looked up on origin, then the \(Config.githubForkOwner) fork. Attaches the existing branch if you already have it checked out locally.")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.inkDim)
         }
     }
 
     private var prFields: some View {
         VStack(alignment: .leading, spacing: 12) {
             field("Repo") {
-                Picker("", selection: $prRepo) {
+                Picker("", selection: $keyboard.createPrRepo) {
                     ForEach(prRepos, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
             }
             VStack(alignment: .leading, spacing: 6) {
-                field("PR number") { TextField("129020", text: $prNumber).textFieldStyle(.plain) }
+                field("PR number") { TextField("129020", text: $keyboard.createPrNumber).textFieldStyle(.plain) }
                 Text("Resolves the PR's head branch and checks it out across all repos.")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.inkDim)
@@ -129,29 +124,6 @@ struct CreateWorktreeView: View {
             content()
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Theme.row))
-        }
-    }
-
-    private func submit() {
-        busy = true
-        error = nil
-        Task {
-            do {
-                switch mode {
-                case .task:
-                    try await store.create(taskId: taskId.trimmingCharacters(in: .whitespaces), fromBranch: fromBranch)
-                case .branch:
-                    try await store.create(branch: branchName.trimmingCharacters(in: .whitespaces))
-                case .pr:
-                    try await store.create(prNumber: Int(prNumber.trimmingCharacters(in: .whitespaces)), prRepo: prRepo)
-                }
-                dismiss()
-            } catch let e as WorktreeStore.CreateError {
-                error = e.message
-            } catch {
-                self.error = error.localizedDescription
-            }
-            busy = false
         }
     }
 }

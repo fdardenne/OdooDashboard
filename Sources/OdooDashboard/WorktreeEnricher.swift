@@ -37,7 +37,17 @@ enum WorktreeEnricher {
         let isMerged = pr.contains { $0?.state == "MERGED" }
         var odooTask: OdooTaskInfo?
         if !entry.taskId.isEmpty, !isMerged {
-            odooTask = await odooTaskCache.getOrFetch(entry.taskId) { await OdooTaskClient.fetchOdooTask(entry.taskId) }
+            let fetched = await odooTaskCache.getOrFetch(entry.taskId) { await OdooTaskClient.fetchOdooTask(entry.taskId) }
+            if let fetched {
+                odooTask = fetched
+                OdooTaskStore.save(entry.taskId, fetched)
+            } else {
+                // Fetch failed (or nothing yet at this TTL) -- e.g. the
+                // odoo.com API key expired, which happens roughly daily.
+                // Keep showing the last successfully-fetched status rather
+                // than blanking the badge and un-"Done"-ing the worktree.
+                odooTask = OdooTaskStore.get(entry.taskId)
+            }
         }
 
         return WorktreeEntry(
@@ -49,7 +59,11 @@ enum WorktreeEnricher {
             description: entry.description,
             installModules: entry.installModules,
             updateModules: entry.updateModules,
-            running: ProcessManager.isAlive(pid),
+            // Not just our own tracked pid -- also treat the worktree as
+            // running if its port is occupied by anything at all (e.g. a
+            // Zed debug session started via the generated debug.json),
+            // so the "open in browser" link still shows up.
+            running: ProcessManager.isAlive(pid) || !PortAllocator.isPortFree(entry.port),
             pr: pr,
             runbot: runbot,
             odooTask: odooTask,

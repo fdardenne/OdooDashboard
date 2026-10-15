@@ -6,8 +6,8 @@ struct WorktreeCardView: View {
     @EnvironmentObject var store: WorktreeStore
     @EnvironmentObject var keyboard: KeyboardController
 
-    @State private var editingDescription = false
     @State private var descriptionDraft = ""
+    @FocusState private var descriptionFieldFocused: Bool
 
     @State private var taskIdDraft = ""
     @State private var installDraft = ""
@@ -22,6 +22,9 @@ struct WorktreeCardView: View {
     private var showDetails: Bool { keyboard.isDetailsOpen(entry.name) }
     private var showLogs: Bool { keyboard.isLogsOpen(entry.name) }
     private var rebaseReport: [RebaseReportItem]? { keyboard.rebaseReports[entry.name] }
+    private var currentActionStatus: String? {
+        store.actionStatus["\(entry.name):rebase"] ?? store.actionStatus["\(entry.name):pull"]
+    }
 
     private var deleteConfirmBinding: Binding<Bool> {
         Binding(
@@ -40,12 +43,13 @@ struct WorktreeCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if !editingDescription { descriptionView } else { descriptionField }
+            if !keyboard.isEditingDescription(entry.name) { descriptionView } else { descriptionField }
 
             FlowLayout(spacing: 6) { badges }
 
             FlowLayout(spacing: 6) { actionButtons }
 
+            if let currentActionStatus { statusLineView(currentActionStatus) }
             if let rebaseReport { rebaseReportView(rebaseReport) }
             if showDetails { detailsPanel }
             if showLogs { logsView }
@@ -58,14 +62,13 @@ struct WorktreeCardView: View {
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 16).fill(Theme.row))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(isFocused ? Theme.focusRing : railBorder, lineWidth: isFocused ? 2 : (entry.railColor == .red ? 1.5 : 1)))
+        // Status color lives only in the badge icon/pills -- keeping the
+        // border neutral except for keyboard focus avoids it being
+        // mistaken for the focus ring while navigating with h/j/k/l.
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(isFocused ? Theme.focusRing : Theme.rule, lineWidth: isFocused ? 2 : 1))
         .onChange(of: showLogs) { _, isOn in isOn ? startLogs() : stopLogs() }
         .onAppear { seedDetailsDrafts() }
         .onChange(of: entry.taskId) { _, _ in if !detailsDirty { seedDetailsDrafts() } }
-    }
-
-    private var railBorder: Color {
-        entry.railColor == .red ? Theme.red.opacity(0.5) : Theme.rule
     }
 
     // MARK: - Header
@@ -107,7 +110,7 @@ struct WorktreeCardView: View {
                         .foregroundStyle(Theme.blue)
                 }
                 .buttonStyle(.plain)
-                .help("Open http://localhost:\(entry.port)")
+                .help("Open http://localhost:\(entry.port) (w)")
             }
         }
     }
@@ -173,7 +176,7 @@ struct WorktreeCardView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .onTapGesture {
                     descriptionDraft = entry.description
-                    editingDescription = true
+                    keyboard.editingDescription.insert(entry.name)
                 }
             Button {
                 Task { await store.generateDescription(entry.name) }
@@ -195,10 +198,19 @@ struct WorktreeCardView: View {
             .padding(6)
             .background(RoundedRectangle(cornerRadius: 6).fill(Theme.panel))
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.accent, lineWidth: 1))
+            .focused($descriptionFieldFocused)
+            // Escape reverts without saving; clicking away or Return both
+            // save -- previously there was no way out at all short of
+            // hitting Return, which read as the field being stuck.
+            .onExitCommand { keyboard.editingDescription.remove(entry.name) }
+            .onAppear { descriptionFieldFocused = true }
+            .onChange(of: descriptionFieldFocused) { _, focused in
+                if !focused && keyboard.isEditingDescription(entry.name) { saveDescription() }
+            }
     }
 
     private func saveDescription() {
-        editingDescription = false
+        keyboard.editingDescription.remove(entry.name)
         if descriptionDraft != entry.description {
             Task { await store.updateDetails(entry.name, description: descriptionDraft) }
         }
@@ -225,8 +237,11 @@ struct WorktreeCardView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        ActionButton(title: "Open in VS Code", icon: "arrow.up.forward.app", style: .primary, isDisabled: store.isBusy(entry.name, "open"), hint: "o") {
+        ActionButton(title: "Open in Zed", icon: "arrow.up.forward.app", style: .primary, isDisabled: store.isBusy(entry.name, "open"), hint: "o") {
             store.run(entry.name, action: "open")
+        }
+        ActionButton(title: "Open in cmux", icon: "square.split.2x1", isDisabled: store.isBusy(entry.name, "open-cmux"), hint: "m") {
+            store.run(entry.name, action: "open-cmux")
         }
         if entry.running {
             ActionButton(title: "Stop", icon: "stop.fill", isDisabled: store.isBusy(entry.name, "stop"), hint: "s") {
@@ -240,8 +255,14 @@ struct WorktreeCardView: View {
                 store.run(entry.name, action: "start")
             }
         }
-        ActionButton(title: "Rebase", icon: "arrow.triangle.2.circlepath", isDisabled: store.isBusy(entry.name, "rebase"), hint: "r") {
-            Task { keyboard.rebaseReports[entry.name] = await store.rebase(entry.name) }
+        if StatusLogic.isOfficialVersionBranch(entry.name) {
+            ActionButton(title: "Pull", icon: "arrow.down.circle", isDisabled: store.isBusy(entry.name, "pull"), hint: "r") {
+                Task { keyboard.rebaseReports[entry.name] = await store.pull(entry.name) }
+            }
+        } else {
+            ActionButton(title: "Rebase", icon: "arrow.triangle.2.circlepath", isDisabled: store.isBusy(entry.name, "rebase"), hint: "r") {
+                Task { keyboard.rebaseReports[entry.name] = await store.rebase(entry.name) }
+            }
         }
         ActionButton(title: "Ask Claude", icon: "sparkles", isDisabled: store.isBusy(entry.name, "ask-claude"), hint: "a") {
             store.askClaude(entry.name)
@@ -269,10 +290,37 @@ struct WorktreeCardView: View {
         }
     }
 
+    // MARK: - Action status
+
+    private func statusLineView(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.inkDim)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.panel))
+    }
+
     // MARK: - Rebase report
 
     private func rebaseReportView(_ report: [RebaseReportItem]) -> some View {
         VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(StatusLogic.isOfficialVersionBranch(entry.name) ? "Pull report" : "Rebase report").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.inkDim)
+                Spacer()
+                Button {
+                    keyboard.rebaseReports[entry.name] = nil
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.inkDim)
+                }
+                .buttonStyle(.plain)
+                .help("Dismiss")
+            }
             ForEach(report) { item in
                 HStack(spacing: 6) {
                     Circle()
@@ -302,7 +350,8 @@ struct WorktreeCardView: View {
     }
 
     private func rebaseLine(_ item: RebaseReportItem) -> String {
-        if item.ok { return "\(item.repo): rebased cleanly" }
+        let isPull = StatusLogic.isOfficialVersionBranch(entry.name)
+        if item.ok { return "\(item.repo): \(isPull ? "pulled cleanly" : "rebased cleanly")" }
         if item.conflict == true { return "\(item.repo): CONFLICT (aborted)" }
         return "\(item.repo): \(item.message ?? "failed")"
     }

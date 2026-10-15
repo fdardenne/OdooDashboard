@@ -67,6 +67,14 @@ enum GitClient {
         _ = try await git(["rebase", ontoRef], cwd: worktreePath)
     }
 
+    /// For standard/trunk branches (master, 18.0, ...) there's nothing to
+    /// rebase onto -- the worktree just needs to catch up to its own remote
+    /// branch. Fast-forward only, so it never silently invents a merge
+    /// commit or clobbers local work.
+    static func fastForwardMerge(_ worktreePath: URL, ref: String) async throws {
+        _ = try await git(["merge", "--ff-only", ref], cwd: worktreePath)
+    }
+
     static func rebaseAbort(_ worktreePath: URL) async {
         _ = try? await git(["rebase", "--abort"], cwd: worktreePath)
     }

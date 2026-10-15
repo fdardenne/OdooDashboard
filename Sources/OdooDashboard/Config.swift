@@ -18,6 +18,8 @@ enum Config {
     static var logsDir: URL { dataDir.appendingPathComponent("logs") }
     static var registryPath: URL { dataDir.appendingPathComponent("registry.json") }
     static var secretsPath: URL { dataDir.appendingPathComponent("secrets.json") }
+    static var digestsPath: URL { dataDir.appendingPathComponent("digests.json") }
+    static var taskSearchScreenshotPath: URL { dataDir.appendingPathComponent("task_search_screenshot.png") }
 
     static var interpreters: [InterpreterMapping] { SettingsKeys.decodeInterpreters(defaults.string(forKey: SettingsKeys.interpretersJson)) }
     static var defaultInterpreterPath: String { defaults.string(forKey: SettingsKeys.defaultInterpreterPath) ?? "" }
@@ -29,6 +31,12 @@ enum Config {
     }
     static var requiredRepos: [String] {
         SettingsKeys.parseList(defaults.string(forKey: SettingsKeys.requiredRepos) ?? SettingsKeys.Defaults.requiredRepos)
+    }
+    static var digestModules: [String] {
+        SettingsKeys.parseList(defaults.string(forKey: SettingsKeys.digestModules) ?? SettingsKeys.Defaults.digestModules)
+    }
+    static var taskSearchProjectId: Int? {
+        Int(defaults.string(forKey: SettingsKeys.taskSearchProjectId) ?? "")
     }
 
     static let basePort = 8069

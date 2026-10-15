@@ -10,6 +10,11 @@ if CommandLine.arguments.contains("--preview") {
         _ = AppSettings.shared // trigger secrets.json migration, matching real app startup
         let store = WorktreeStore()
         let keyboard = KeyboardController()
+        if let catArg = CommandLine.arguments.first(where: { $0.hasPrefix("--category=") }),
+           let rawValue = Int(catArg.replacingOccurrences(of: "--category=", with: "")),
+           let cat = WorktreeCategory(rawValue: rawValue) {
+            keyboard.category = cat
+        }
         await store.refresh() // already awaits full enrichment before returning
         try? await Task.sleep(nanoseconds: 500_000_000)
         FileHandle.standardError.write("worktrees: \(store.worktrees.count), reachable: \(store.serverReachable)\n".data(using: .utf8)!)
@@ -32,8 +37,20 @@ if CommandLine.arguments.contains("--preview") {
             .padding(.top, 18)
             .padding(.bottom, 16)
 
+            HStack(spacing: 4) {
+                ForEach(WorktreeCategory.allCases, id: \.self) { cat in
+                    let count = store.worktrees.filter { WorktreeCategory.matches(cat, $0) }.count
+                    Text("\(cat.title) \(count) [\(cat.rawValue)]")
+                        .font(.system(size: 12, weight: cat == keyboard.category ? .bold : .regular, design: .monospaced))
+                        .foregroundStyle(cat == keyboard.category ? Theme.accent : Theme.inkDim)
+                        .padding(.horizontal, 8)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 10)
+
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 380, maximum: 460), spacing: 14)], spacing: 14) {
-                ForEach(store.worktrees) { entry in
+                ForEach(store.worktrees.filter { WorktreeCategory.matches(keyboard.category, $0) }) { entry in
                     WorktreeCardView(entry: entry).environmentObject(store).environmentObject(keyboard)
                 }
             }

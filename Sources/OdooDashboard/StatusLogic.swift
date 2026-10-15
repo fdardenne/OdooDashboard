@@ -10,14 +10,38 @@ enum StatusLogic {
         return officialVersionBranch.firstMatch(in: name, range: range) != nil
     }
 
+    /// Best-effort Odoo task id out of a branch name like
+    /// "master-6482307-dafl" or "saas-18.2-6501419-xyz" -- the first
+    /// purely-numeric, task-id-length segment. Version segments ("18.0",
+    /// "18") and the trailing trigram never match since they aren't 5+
+    /// digits with no dot, so this only fires on an actual task id.
+    static func inferredTaskId(fromBranch branch: String) -> String? {
+        let parts: [Substring] = branch.split(separator: "-")
+        return parts.first { $0.count >= 5 && $0.allSatisfy(\.isNumber) }.map(String.init)
+    }
+
+    /// Pure PR-review-state coloring -- CI status is shown separately via
+    /// the runbot/build badges, so it doesn't also drive this tone.
+    /// merged/closed = done (green). r+/approved = will be merged (green).
+    /// changes requested/conflicting = actually blocked (red).
     static func prTone(_ pr: PrInfo) -> BadgePill.Tone {
-        if pr.state == "MERGED" { return .green }
-        if pr.state == "CLOSED" { return .red }
-        if pr.ciStatus == "failure" { return .red }
-        if pr.reviewDecision == "CHANGES_REQUESTED" { return .red }
-        if pr.ciStatus == "pending" { return .yellow }
-        if pr.reviewDecision == "APPROVED" || pr.mergebotApproved { return .green }
+        if pr.state == "MERGED" || pr.state == "CLOSED" { return .green }
+        if pr.reviewDecision == "CHANGES_REQUESTED" || pr.mergeable == "CONFLICTING" { return .red }
+        if pr.mergebotApproved || pr.reviewDecision == "APPROVED" { return .green }
         return .yellow
+    }
+
+    /// One-word status, in priority order: merged > closed > r+'d >
+    /// approved > changes requested > conflict. nil when none apply (e.g. a
+    /// plain pending-review PR) -- the badge just shows the PR number then.
+    static func prStatusLabel(_ pr: PrInfo) -> String? {
+        if pr.state == "MERGED" { return "merged" }
+        if pr.state == "CLOSED" { return "closed" }
+        if pr.mergebotApproved { return "r+" }
+        if pr.reviewDecision == "APPROVED" { return "approved" }
+        if pr.reviewDecision == "CHANGES_REQUESTED" { return "changes requested" }
+        if pr.mergeable == "CONFLICTING" { return "conflict" }
+        return nil
     }
 
     static func runbotTone(_ status: String) -> BadgePill.Tone {
@@ -70,11 +94,15 @@ enum StatusLogic {
             for repo in Config.worktreeRepos {
                 if let pr = entry.pr.first(where: { $0?.repo == repo }) ?? nil {
                     let url = URL(string: pr.url)
+                    let statusSuffix = prStatusLabel(pr).map { " · \($0)" } ?? ""
                     specs.append(BadgeSpec(
-                        text: "\(repo) #\(pr.number)\(pr.isDraft ? " draft" : "")",
+                        text: "\(repo) #\(pr.number)\(pr.isDraft ? " draft" : "")\(statusSuffix)",
                         tone: prTone(pr), url: url, tooltip: pr.title, hintKey: hint(for: url)
                     ))
-                } else {
+                } else if Config.requiredRepos.contains(repo) {
+                    // Only the required repos (odoo/enterprise by default) show
+                    // a "no PR" badge -- for everything else, a PR is optional,
+                    // so skip the badge entirely rather than clutter the row.
                     let url = createPrUrl(repo: repo, entry: entry)
                     specs.append(BadgeSpec(
                         text: "\(repo): no PR", tone: .neutral, url: url,
@@ -84,10 +112,13 @@ enum StatusLogic {
             }
         }
         if let runbot = entry.runbot {
-            let batchUrlString = runbot.batchUrl.isEmpty ? runbot.bundleUrl : runbot.batchUrl
-            let url = URL(string: batchUrlString)
+            // Just a stable link to the bundle overview -- per-build status is
+            // already conveyed by the build badges below, so this one doesn't
+            // need to repeat it (and always uses bundleUrl, not the
+            // most-recent-batch URL, since that one changes every run).
+            let url = URL(string: runbot.bundleUrl)
             specs.append(BadgeSpec(
-                text: "runbot: \(runbot.status) (\(runbot.batchTimeAgo))",
+                text: "runbot bundle",
                 tone: runbotTone(runbot.status), url: url, tooltip: nil, hintKey: hint(for: url)
             ))
             for build in runbot.builds {

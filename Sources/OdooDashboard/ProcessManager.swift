@@ -4,7 +4,7 @@ import Darwin
 #endif
 
 /// Ports packages/core/src/process.ts -- spawns/stops the odoo-bin process
-/// directly (not via VS Code's debugger, which is launch.json's job).
+/// directly (not via Zed's debugger, which is debug.json's job).
 enum ProcessManager {
     static func isAlive(_ pid: Int32?) -> Bool {
         guard let pid, pid > 0 else { return false }
@@ -20,6 +20,9 @@ enum ProcessManager {
             "--http-port", String(entry.port),
             "--http-interface", "127.0.0.1",
             "--addons-path", addonsPath.joined(separator: ","),
+            "--with-demo",
+            "--update", entry.updateModules,
+            "--init", entry.installModules,
         ]
 
         var upgradePath: [String] = []

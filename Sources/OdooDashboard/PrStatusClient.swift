@@ -20,6 +20,7 @@ enum PrStatusClient {
         let url: String
         let statusCheckRollup: [RawCheck]?
         let comments: [RawComment]?
+        let mergeable: String?
     }
 
     private static let mergebotApprove = try! NSRegularExpression(pattern: #"^@robodoo\s+r\+"#, options: .caseInsensitive)
@@ -53,7 +54,7 @@ enum PrStatusClient {
     private static func fetchOne(repo: String, branch: String) async -> PrInfo? {
         guard let out = try? await ProcessRunner.run(BinaryLocator.gh, [
             "pr", "list", "--repo", "\(Config.githubUpstreamOwner)/\(repo)", "--head", branch, "--state", "all",
-            "--json", "number,title,state,isDraft,reviewDecision,url,statusCheckRollup,comments",
+            "--json", "number,title,state,isDraft,reviewDecision,url,statusCheckRollup,comments,mergeable",
             "--limit", "1",
         ]) else { return nil }
         guard let data = out.data(using: .utf8),
@@ -62,7 +63,8 @@ enum PrStatusClient {
         return PrInfo(
             repo: repo, number: raw.number, url: raw.url, title: raw.title, state: raw.state,
             isDraft: raw.isDraft, reviewDecision: raw.reviewDecision ?? "",
-            mergebotApproved: deriveMergebotApproved(raw.comments), ciStatus: deriveCiStatus(raw.statusCheckRollup)
+            mergebotApproved: deriveMergebotApproved(raw.comments), ciStatus: deriveCiStatus(raw.statusCheckRollup),
+            mergeable: raw.mergeable ?? "UNKNOWN"
         )
     }
 

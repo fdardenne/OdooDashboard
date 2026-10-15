@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // as the first keypress.
         _ = AppSettings.shared
         store.start()
+        installStandardEditMenu()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
@@ -43,6 +44,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         installHotKeyTap()
+    }
+
+    /// An accessory app with no visible menu bar of its own still needs a
+    /// real NSApp.mainMenu for standard Cmd+C/X/V/A (and Cmd+Z, though
+    /// SwiftUI's TextField undo support on macOS is inconsistent regardless)
+    /// to work in text fields -- without an Edit menu somewhere carrying
+    /// those key equivalents, AppKit never routes them to the focused field
+    /// editor at all, no matter how the field itself is built.
+    private func installStandardEditMenu() {
+        let mainMenu = NSMenu()
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     /// Bare "$" (Shift+4 on a US layout, no other modifier) toggles the
@@ -131,6 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case 53: // Escape: undo the most specific thing that's open first.
             if keyboard.showShortcuts {
                 keyboard.showShortcuts = false
+            } else if keyboard.page != .worktrees {
+                keyboard.page = .worktrees
             } else if !keyboard.filterText.isEmpty {
                 keyboard.filterText = ""
                 keyboard.clampFocus(to: store.worktrees)
@@ -139,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return true
         case 36, 76: // Return / keypad enter -- primary action.
-            performAction(.open)
+            if keyboard.page == .worktrees { performAction(.open) }
             return true
         default:
             break
@@ -148,12 +176,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
               let chars = event.charactersIgnoringModifiers else { return false }
 
+        // These work regardless of which page is showing.
+        switch chars {
+        case "d":
+            keyboard.page = keyboard.page == .digest ? .worktrees : .digest
+            return true
+        case "t":
+            keyboard.page = keyboard.page == .search ? .worktrees : .search
+            return true
+        case "?":
+            keyboard.showShortcuts.toggle()
+            return true
+        default:
+            break
+        }
+        guard keyboard.page == .worktrees else { return false }
+
         switch chars {
         case "j": moveFocus(rowDelta: 1)
         case "k": moveFocus(rowDelta: -1)
         case "h": moveFocus(colDelta: -1)
         case "l": moveFocus(colDelta: 1)
         case "o": performAction(.open)
+        case "m": performAction(.openCmux)
+        case "w": performAction(.openBrowser)
         case "s": performAction(.toggleRun)
         case "r": performAction(.rebase)
         case "a": performAction(.askClaude)
@@ -163,13 +209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "D": performAction(.dropDb)
         case "c": performAction(.copyPath)
         case "f": enterLinkMode()
+        case "1": switchCategory(.main)
+        case "2": switchCategory(.archived)
+        case "3": switchCategory(.standard)
+        case "4": switchCategory(.all)
         case "/":
             keyboard.isFiltering = true
             keyboard.filterText = ""
         case "n":
             keyboard.showCreate = true
-        case "?":
-            keyboard.showShortcuts.toggle()
         default:
             return false
         }
@@ -240,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Focus movement & actions
 
-    private enum QuickAction { case open, toggleRun, rebase, askClaude, toggleDetails, toggleLogs, delete, dropDb, copyPath }
+    private enum QuickAction { case open, openCmux, openBrowser, toggleRun, rebase, askClaude, toggleDetails, toggleLogs, delete, dropDb, copyPath }
 
     private func performAction(_ action: QuickAction) {
         guard let name = keyboard.focusedName,
@@ -248,10 +296,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch action {
         case .open:
             store.run(name, action: "open")
+        case .openCmux:
+            store.run(name, action: "open-cmux")
+        case .openBrowser:
+            guard entry.running, let url = URL(string: "http://localhost:\(entry.port)") else { return }
+            NSWorkspace.shared.open(url)
         case .toggleRun:
             store.run(name, action: entry.running ? "stop" : "start")
         case .rebase:
-            Task { keyboard.rebaseReports[name] = await store.rebase(name) }
+            if StatusLogic.isOfficialVersionBranch(name) {
+                Task { keyboard.rebaseReports[name] = await store.pull(name) }
+            } else {
+                Task { keyboard.rebaseReports[name] = await store.rebase(name) }
+            }
         case .askClaude:
             store.askClaude(name)
         case .toggleDetails:
@@ -270,6 +327,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pasteboard.setString(Config.worktreesRoot.appendingPathComponent(name).path, forType: .string)
             keyboard.markCopied(name)
         }
+    }
+
+    private func switchCategory(_ category: WorktreeCategory) {
+        keyboard.category = category
+        keyboard.clampFocus(to: store.worktrees)
     }
 
     private func moveFocus(rowDelta: Int = 0, colDelta: Int = 0) {
@@ -408,7 +470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let glassView = NSGlassEffectView(frame: frame)
         glassView.style = .clear
         glassView.cornerRadius = 16
-        glassView.tintColor = NSColor(Theme.panel).withAlphaComponent(0.05)
+        glassView.tintColor = NSColor(Theme.panel).withAlphaComponent(0.7)
 
         keyboard.reset()
         keyboard.clampFocus(to: store.worktrees)
@@ -420,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hosting.frame = frame
         glassView.contentView = hosting
 
-        let newPanel = NSPanel(
+        let newPanel = KeyablePanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,

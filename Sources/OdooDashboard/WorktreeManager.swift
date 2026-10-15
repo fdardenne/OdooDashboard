@@ -1,5 +1,9 @@
 import Foundation
 
+/// One-line, human-readable status updates emitted mid-action (create,
+/// rebase, pull) so the UI can show what's happening instead of a bare spinner.
+typealias ProgressReporter = @Sendable (String) -> Void
+
 struct CreateOptions {
     var taskId: String? = nil
     var fromBranch: String? = nil
@@ -28,7 +32,7 @@ struct DetailUpdates {
 }
 
 /// Ports packages/core/src/worktree.ts -- the orchestration layer wiring
-/// GitClient, Registry, PortAllocator, InterpreterResolver, LaunchJsonWriter,
+/// GitClient, Registry, PortAllocator, InterpreterResolver, ZedDebugConfigWriter,
 /// and ProcessManager together. Function-for-function port of the TS file.
 enum WorktreeManager {
     private static func dbNameFor(_ branch: String) -> String {
@@ -66,7 +70,7 @@ enum WorktreeManager {
         return nil
     }
 
-    static func createWorktree(_ opts: CreateOptions) async throws -> CreateResult {
+    static func createWorktree(_ opts: CreateOptions, progress: ProgressReporter? = nil) async throws -> CreateResult {
         let trimmedBranch = opts.branch?.trimmingCharacters(in: .whitespaces)
         let explicitBranch = (trimmedBranch?.isEmpty == false) ? trimmedBranch : nil
         guard explicitBranch != nil || opts.taskId != nil || opts.nameOverride != nil else {
@@ -80,6 +84,7 @@ enum WorktreeManager {
         let remoteCandidates = explicitBranch != nil ? ["origin", "dev"] : ["origin"]
         let remoteRefToFind = explicitBranch ?? fromBranch
 
+        progress?("Checking \"\(branch)\" is free…")
         let registry = Registry.loadRegistry()
         if registry.worktrees[branch] != nil {
             throw ProcessError(message: "Worktree \"\(branch)\" already exists. Use a different name or delete it first.")
@@ -92,9 +97,12 @@ enum WorktreeManager {
 
         // Each repo's worktree is fully independent -- create them all
         // concurrently instead of one at a time.
+        let repos = Config.worktreeRepos
+        progress?("Creating worktrees in \(repos.count) repo\(repos.count == 1 ? "" : "s")…")
         var repoResults: [String: RepoCreateResult] = [:]
+        var doneCount = 0
         await withTaskGroup(of: (String, RepoCreateResult).self) { group in
-            for repo in Config.worktreeRepos {
+            for repo in repos {
                 group.addTask {
                     let baseRepoPath = Config.odooWorkspace.appendingPathComponent(repo)
                     let destPath = destRoot.appendingPathComponent(repo)
@@ -105,11 +113,16 @@ enum WorktreeManager {
                         let detached: Bool
                         if await GitClient.localBranchExists(baseRepoPath, branch: branch) {
                             detached = try await GitClient.worktreeAdd(baseRepoPath, destPath: destPath, branch: branch, startPoint: "").detached
-                        } else {
-                            guard let startPoint = await resolveStartPoint(baseRepoPath, branch: remoteRefToFind, remotes: remoteCandidates) else {
-                                throw ProcessError(message: "\"\(remoteRefToFind)\" not found locally or on remote(s) [\(remoteCandidates.joined(separator: ", "))] in \(repo)")
-                            }
+                        } else if let startPoint = await resolveStartPoint(baseRepoPath, branch: remoteRefToFind, remotes: remoteCandidates) {
                             detached = try await GitClient.worktreeAdd(baseRepoPath, destPath: destPath, branch: branch, startPoint: startPoint).detached
+                        } else {
+                            // This repo doesn't have `branch` at all (e.g. importing a
+                            // branch that only touched enterprise, not odoo) -- create
+                            // it fresh off fromBranch instead of failing the whole thing.
+                            guard let fallbackStart = await resolveStartPoint(baseRepoPath, branch: fromBranch, remotes: ["origin"]) else {
+                                throw ProcessError(message: "\"\(remoteRefToFind)\" not found locally or on remote(s) [\(remoteCandidates.joined(separator: ", "))] in \(repo), and base branch \"\(fromBranch)\" not found on origin either")
+                            }
+                            detached = try await GitClient.worktreeAdd(baseRepoPath, destPath: destPath, branch: branch, startPoint: fallbackStart).detached
                         }
                         return (repo, RepoCreateResult(path: destPath.path, ok: true, detached: detached))
                     } catch {
@@ -119,11 +132,14 @@ enum WorktreeManager {
             }
             for await (repo, result) in group {
                 repoResults[repo] = result
+                doneCount += 1
+                progress?("Created \(doneCount)/\(repos.count) repo worktrees…")
             }
         }
 
         let missingRequired = Config.requiredRepos.filter { !(repoResults[$0]?.ok ?? false) }
         if !missingRequired.isEmpty {
+            progress?("Rolling back — \(missingRequired.joined(separator: ", ")) failed…")
             // Roll back any worktrees that DID get created before failing.
             await withTaskGroup(of: Void.self) { group in
                 for repo in Config.worktreeRepos {
@@ -138,6 +154,7 @@ enum WorktreeManager {
             throw ProcessError(message: "Failed to create required repo worktree(s) [\(missingRequired.joined(separator: ", "))]: \(details)")
         }
 
+        progress?("Allocating port & resolving interpreter…")
         let usedPorts = Set(registry.worktrees.values.map(\.port))
         let port = try PortAllocator.allocatePort(usedPorts: usedPorts)
         let db = dbNameFor(branch)
@@ -157,7 +174,13 @@ enum WorktreeManager {
             installModules: Config.defaultInstallModules, updateModules: Config.defaultUpdateModules, description: ""
         )
 
-        LaunchJsonWriter.write(worktreeRoot: destRoot, entry: entry)
+        progress?("Writing Zed debug config…")
+        ZedDebugConfigWriter.write(worktreeRoot: destRoot, entry: entry)
+
+        progress?("Copying Claude settings and skills…")
+        ClaudeConfigCopier.copy(into: destRoot)
+
+        progress?("Saving to registry…")
 
         try await Registry.withRegistry { reg in
             reg.worktrees[branch] = entry
@@ -221,7 +244,7 @@ enum WorktreeManager {
             if let v = updates.description { entry.description = v }
             if let v = updates.installModules { entry.installModules = v }
             if let v = updates.updateModules { entry.updateModules = v }
-            LaunchJsonWriter.write(worktreeRoot: Config.worktreesRoot.appendingPathComponent(name), entry: entry)
+            ZedDebugConfigWriter.write(worktreeRoot: Config.worktreesRoot.appendingPathComponent(name), entry: entry)
             reg.worktrees[name] = entry
             return entry
         }
@@ -230,11 +253,14 @@ enum WorktreeManager {
     /// Fetches the base branch and rebases each repo's worktree onto it,
     /// concurrently. Never force-pushes. On conflict, aborts that repo's
     /// rebase and reports it -- the caller resolves manually.
-    static func rebaseWorktree(_ name: String) async throws -> [RebaseReportItem] {
+    static func rebaseWorktree(_ name: String, progress: ProgressReporter? = nil) async throws -> [RebaseReportItem] {
         let entry = try getWorktree(name)
+        let repos = Config.worktreeRepos.filter { entry.repos[$0] != nil }
+        progress?("Fetching origin/\(entry.fromBranch) in \(repos.count) repo\(repos.count == 1 ? "" : "s")…")
         var reportsByRepo: [String: RebaseReportItem] = [:]
+        var doneCount = 0
         await withTaskGroup(of: RebaseReportItem.self) { group in
-            for repo in Config.worktreeRepos {
+            for repo in repos {
                 guard let worktreePath = entry.repos[repo] else { continue }
                 group.addTask {
                     let baseRepoPath = Config.odooWorkspace.appendingPathComponent(repo)
@@ -252,6 +278,41 @@ enum WorktreeManager {
             }
             for await report in group {
                 reportsByRepo[report.repo] = report
+                doneCount += 1
+                progress?("Rebased \(doneCount)/\(repos.count) repos…")
+            }
+        }
+        return Config.worktreeRepos.compactMap { reportsByRepo[$0] }
+    }
+
+    /// Standard/trunk branches (master, 18.0, ...) aren't rebased -- there's
+    /// no divergent base to replay onto. Instead fetch + fast-forward merge
+    /// each repo's worktree to its own remote branch, concurrently.
+    static func pullWorktree(_ name: String, progress: ProgressReporter? = nil) async throws -> [RebaseReportItem] {
+        let entry = try getWorktree(name)
+        let repos = Config.worktreeRepos.filter { entry.repos[$0] != nil }
+        progress?("Fetching origin/\(entry.fromBranch) in \(repos.count) repo\(repos.count == 1 ? "" : "s")…")
+        var reportsByRepo: [String: RebaseReportItem] = [:]
+        var doneCount = 0
+        await withTaskGroup(of: RebaseReportItem.self) { group in
+            for repo in repos {
+                guard let worktreePath = entry.repos[repo] else { continue }
+                group.addTask {
+                    let baseRepoPath = Config.odooWorkspace.appendingPathComponent(repo)
+                    let wtPath = URL(fileURLWithPath: worktreePath)
+                    do {
+                        try await GitClient.fetch(baseRepoPath, remote: "origin", ref: entry.fromBranch)
+                        try await GitClient.fastForwardMerge(wtPath, ref: "origin/\(entry.fromBranch)")
+                        return RebaseReportItem(repo: repo, ok: true, conflict: nil, message: nil)
+                    } catch {
+                        return RebaseReportItem(repo: repo, ok: false, conflict: false, message: error.localizedDescription)
+                    }
+                }
+            }
+            for await report in group {
+                reportsByRepo[report.repo] = report
+                doneCount += 1
+                progress?("Pulled \(doneCount)/\(repos.count) repos…")
             }
         }
         return Config.worktreeRepos.compactMap { reportsByRepo[$0] }
